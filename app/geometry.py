@@ -34,15 +34,22 @@ from dataclasses import dataclass
 
 
 class GeometryError(Exception):
-    """输入矩形非法时抛出，message 为面向调用方的稳定错误信息。
+    """输入非法时抛出，message 为面向调用方的稳定错误信息。
 
     ``location`` 为结构化输入位置（如 ``{"index": 3, "id": "r7"}``），
-    便于调用方定位；无更细位置时为 ``None``。
+    便于调用方定位；无更细位置时为 ``None``。``code`` 为稳定错误码，
+    缺省为矩形校验失败；其它入口可传入自己的错误码。
     """
 
-    def __init__(self, message: str, location: dict | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        location: dict | None = None,
+        code: str = "invalid_rectangle",
+    ) -> None:
         super().__init__(message)
         self.location = location
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -225,18 +232,20 @@ def audit_rectangles(rects: list[Rect]) -> tuple[int, int]:
     return _sweep(rects)
 
 
-def audit_raw(records: list[dict]) -> tuple[str, str]:
-    """校验并计算，返回十进制字符串 ``(area, perimeter)``。
+def validate_rectangles(
+    records: list[dict], *, min_count: int = 1, max_count: int = 50000
+) -> list[Rect]:
+    """全量校验矩形载荷，任何一条非法都抛出带位置的 ``GeometryError``。
 
-    每条记录形如 ``{"id": ..., "x1": ..., "y1": ..., "x2": ..., "y2": ...}``。
-    任何一条非法都抛出 ``GeometryError``，错误信息带输入位置（索引/ID），
-    不返回任何部分结果。
+    校验先于计算完成，绝不返回部分结果。默认上下限沿用 ``/api/audit``；
+    其它入口可通过 ``max_count`` 收紧（如清洗复核至多 180 个矩形）。
     """
     if not isinstance(records, list):
         raise GeometryError("request body must be a JSON array of rectangles")
-    if not 1 <= len(records) <= 50000:
+    if not min_count <= len(records) <= max_count:
         raise GeometryError(
-            f"rectangle count must be between 1 and 50000, got {len(records)}"
+            f"rectangle count must be between {min_count} and {max_count}, "
+            f"got {len(records)}"
         )
 
     rects: list[Rect] = []
@@ -291,6 +300,16 @@ def audit_raw(records: list[dict]) -> tuple[str, str]:
         rects.append(
             Rect(rid, coords["x1"], coords["y1"], coords["x2"], coords["y2"])
         )
+    return rects
 
+
+def audit_raw(records: list[dict]) -> tuple[str, str]:
+    """校验并计算，返回十进制字符串 ``(area, perimeter)``。
+
+    每条记录形如 ``{"id": ..., "x1": ..., "y1": ..., "x2": ..., "y2": ...}``。
+    任何一条非法都抛出 ``GeometryError``，错误信息带输入位置（索引/ID），
+    不返回任何部分结果。
+    """
+    rects = validate_rectangles(records)
     area, perimeter = audit_rectangles(rects)
     return str(area), str(perimeter)

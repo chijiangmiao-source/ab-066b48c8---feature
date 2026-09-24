@@ -9,6 +9,7 @@ from __future__ import annotations
 import threading
 from typing import Callable
 
+from .clearance import maximum_clearance
 from .geometry import GeometryError, Rect, audit_raw, audit_rectangles
 
 
@@ -59,6 +60,17 @@ def _engine_selftest() -> None:
     )
     if (area, perimeter) != (10, 14):
         raise AssertionError(f"engine selftest mismatch: {area=} {perimeter=}")
+    # 净空引擎自检：角点相接 r=0 可通且路径经过接触点；共边允许正净空。
+    corner = maximum_clearance(
+        [Rect("a", 0, 0, 2, 2), Rect("b", 2, 2, 4, 4)], (1, 1), (3, 3)
+    )
+    if corner.max_r != 0 or (2, 2) not in corner.path:
+        raise AssertionError("clearance corner-contact selftest mismatch")
+    edge = maximum_clearance(
+        [Rect("a", 0, 0, 2, 4), Rect("b", 2, 0, 4, 4)], (1, 2), (3, 2)
+    )
+    if edge.max_r < 1:
+        raise AssertionError("clearance edge-adjacent selftest mismatch")
 
 
 class ComponentRegistry:

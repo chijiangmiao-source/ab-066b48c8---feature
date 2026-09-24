@@ -169,5 +169,142 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(status, 404)
 
 
+class ClearanceApiTest(unittest.TestCase):
+    def setUp(self):
+        registry.start_all()
+        self.server = build_server("127.0.0.1", 0)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+    def _request(self, body):
+        url = f"http://127.0.0.1:{self.port}/api/clearance-audit"
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def test_basic_clearance_path(self):
+        status, payload = self._request(
+            {
+                "rectangles": [
+                    {"id": "a", "x1": 0, "y1": 0, "x2": 6, "y2": 6},
+                ],
+                "start": [2, 3],
+                "end": [4, 3],
+            }
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["max_clearance"], 2)
+        self.assertEqual(payload["path"][0], [2, 3])
+        self.assertEqual(payload["path"][-1], [4, 3])
+
+    def test_corner_contact_gives_r0_path(self):
+        status, payload = self._request(
+            {
+                "rectangles": [
+                    {"id": "a", "x1": 0, "y1": 0, "x2": 2, "y2": 2},
+                    {"id": "b", "x1": 2, "y1": 2, "x2": 4, "y2": 4},
+                ],
+                "start": [1, 1],
+                "end": [3, 3],
+            }
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["max_clearance"], 0)
+        self.assertIn([2, 2], payload["path"])
+
+    def test_sample_outside_union_400(self):
+        status, payload = self._request(
+            {
+                "rectangles": [{"id": "a", "x1": 0, "y1": 0, "x2": 2, "y2": 2}],
+                "start": [5, 1],
+                "end": [1, 1],
+            }
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "sample_not_in_union")
+        self.assertEqual(payload["error"]["location"]["point"], "start")
+        self.assertNotIn("path", payload)
+
+    def test_unreachable_even_r0_400(self):
+        status, payload = self._request(
+            {
+                "rectangles": [
+                    {"id": "a", "x1": 0, "y1": 0, "x2": 1, "y2": 1},
+                    {"id": "b", "x1": 3, "y1": 3, "x2": 4, "y2": 4},
+                ],
+                "start": [0, 0],
+                "end": [3, 3],
+            }
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "no_clearance_path")
+
+    def test_invalid_point_400(self):
+        status, payload = self._request(
+            {
+                "rectangles": [{"id": "a", "x1": 0, "y1": 0, "x2": 4, "y2": 4}],
+                "start": [1, 1.5],
+                "end": [3, 3],
+            }
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_sample_point")
+
+    def test_too_many_rects_400(self):
+        status, payload = self._request(
+            {
+                "rectangles": [
+                    {"id": f"r{i}", "x1": i, "y1": 0, "x2": i + 1, "y2": 1}
+                    for i in range(181)
+                ],
+                "start": [0, 0],
+                "end": [1, 1],
+            }
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_rectangle")
+        self.assertIn("1 and 180", payload["error"]["message"])
+
+    def test_bad_rectangle_keeps_location(self):
+        status, payload = self._request(
+            {
+                "rectangles": [{"id": "x", "x1": 2, "y1": 0, "x2": 1, "y2": 1}],
+                "start": [0, 0],
+                "end": [1, 1],
+            }
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_rectangle")
+        self.assertEqual(payload["error"]["location"], {"index": 0, "id": "x"})
+
+    def test_body_must_be_object(self):
+        url = f"http://127.0.0.1:{self.port}/api/clearance-audit"
+        data = json.dumps([1, 2, 3]).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            self.fail("expected 400")
+        except urllib.error.HTTPError as exc:
+            payload = json.loads(exc.read().decode("utf-8"))
+            self.assertEqual(exc.code, 400)
+            self.assertEqual(payload["error"]["code"], "bad_request")
+
+
 if __name__ == "__main__":
     unittest.main()

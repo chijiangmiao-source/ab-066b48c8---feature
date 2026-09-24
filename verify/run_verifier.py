@@ -8,7 +8,8 @@
    - 重叠框：面积 10、周长 14；
    - 相邻方框：不计公共边（面积 12、周长 14）；
    - 几何重复框：不增量（面积 6、周长 10）；
-   - 标识重复 / 非法矩形：400 且带输入位置、不夹带部分结果。
+   - 标识重复 / 非法矩形：400 且带输入位置、不夹带部分结果；
+   - 净空复核：精确最大半边长 + 可复查折线；取样点越界稳定 400。
 
 全部通过退出码 0，否则 1。
 """
@@ -83,10 +84,10 @@ def wait_healthy() -> bool:
     return False
 
 
-def _post(records):
+def _post(records, path="/api/audit"):
     data = json.dumps(records).encode("utf-8")
     req = urllib.request.Request(
-        f"{BASE_URL}/api/audit",
+        f"{BASE_URL}{path}",
         data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -174,6 +175,42 @@ def run_http_smoke() -> bool:
         _ok("非法矩形带输入位置", err.get("message", ""))
     else:
         _fail("非法矩形", f"status={status} payload={payload}")
+        ok = False
+
+    # 净空复核：单框内部两点，最大半边长 = 到最近外边界的距离（精确）。
+    status, payload = _post(
+        {
+            "rectangles": [{"id": "a", "x1": 0, "y1": 0, "x2": 6, "y2": 6}],
+            "start": [2, 3],
+            "end": [4, 3],
+        },
+        path="/api/clearance-audit",
+    )
+    if (
+        status == 200
+        and payload.get("max_clearance") == 2
+        and payload.get("path", [None])[0] == [2, 3]
+        and payload.get("path", [None, None])[-1] == [4, 3]
+    ):
+        _ok("净空复核返回精确 r 与可复查折线", json.dumps(payload))
+    else:
+        _fail("净空复核", f"status={status} payload={payload}")
+        ok = False
+
+    # 净空失败语义：点在框外 -> sample_not_in_union（400，无部分结果）。
+    status, payload = _post(
+        {
+            "rectangles": [{"id": "a", "x1": 0, "y1": 0, "x2": 2, "y2": 2}],
+            "start": [9, 9],
+            "end": [1, 1],
+        },
+        path="/api/clearance-audit",
+    )
+    err = payload.get("error", {}) if isinstance(payload, dict) else {}
+    if status == 400 and err.get("code") == "sample_not_in_union":
+        _ok("净空取样点越界稳定失败", err.get("message", ""))
+    else:
+        _fail("净空越界", f"status={status} payload={payload}")
         ok = False
 
     return ok
