@@ -1,0 +1,37 @@
+services:
+  audit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: photomask-audit:latest
+    environment:
+      AUDIT_HOST: 0.0.0.0
+      AUDIT_PORT: 8080
+    ports:
+      # 宿主机端口可配置：AUDIT_HOST_PORT=9090 docker compose up
+      - "${AUDIT_HOST_PORT:-8080}:8080"
+    healthcheck:
+      # 只有请求校验器与扫描引擎均完成启动自检、/healthz 返回 200 才健康。
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).status==200 else 1)"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 2s
+    restart: unless-stopped
+
+  verify:
+    image: photomask-audit:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "verify/run_verifier.py"]
+    healthcheck:
+      disable: true
+    environment:
+      AUDIT_BASE_URL: http://audit:8080
+      AUDIT_WORKDIR: /srv
+      VERIFY_HEALTH_TIMEOUT: "30"
+    depends_on:
+      audit:
+        condition: service_healthy
+    restart: "no"
