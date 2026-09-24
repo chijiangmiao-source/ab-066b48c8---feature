@@ -5,6 +5,9 @@
 * ``POST /api/audit`` —— 请求体为矩形数组（或 ``{"rectangles": [...]}``），
   成功返回 ``{"area": "十进制", "perimeter": "十进制"}``；
   校验失败返回 400 与带输入位置的稳定错误，且不夹带任何部分结果。
+* ``POST /api/clearance-audit`` —— 请求体为 ``{"rectangles", "start",
+  "end"}``，返回 ``{"r", "start", "end", "path"}``；取样点不在并集内或
+  r=0 仍不可达返回 400 稳定错误。
 * ``GET  /healthz``   —— 请求校验器与扫描引擎均就绪时 200，否则 503。
 """
 
@@ -15,6 +18,7 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .components import registry
+from .clearance import clearance_audit_raw
 from .geometry import GeometryError, audit_raw
 
 MAX_BODY_BYTES = 64 * 1024 * 1024
@@ -52,14 +56,19 @@ class AuditHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "service": "photomask-defect-audit",
-                    "endpoints": {"audit": "POST /api/audit", "health": "GET /healthz"},
+                    "endpoints": {
+                        "audit": "POST /api/audit",
+                        "clearance_audit": "POST /api/clearance-audit",
+                        "health": "GET /healthz",
+                    },
                 },
             )
             return
         self._send_json(404, {"error": {"code": "not_found", "message": self.path}})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path.split("?", 1)[0] != "/api/audit":
+        path = self.path.split("?", 1)[0]
+        if path not in ("/api/audit", "/api/clearance-audit"):
             self._send_json(404, {"error": {"code": "not_found", "message": self.path}})
             return
 
@@ -77,42 +86,54 @@ class AuditHandler(BaseHTTPRequestHandler):
             )
             return
 
+        payload, error = self._read_json_payload()
+        if error is not None:
+            self._bad_request(error[0], None, error[1])
+            return
+
+        if path == "/api/audit":
+            records = payload["rectangles"] if (
+                isinstance(payload, dict) and "rectangles" in payload
+            ) else payload
+            try:
+                area, perimeter = audit_raw(records)
+            except GeometryError as exc:
+                # 全量校验先于计算：这里绝不会产生部分结果。
+                self._bad_request(
+                    str(exc), exc.location, exc.code or "invalid_rectangle"
+                )
+                return
+            self._send_json(200, {"area": area, "perimeter": perimeter})
+            return
+
+        # POST /api/clearance-audit
+        try:
+            result = clearance_audit_raw(payload)
+        except GeometryError as exc:
+            self._bad_request(
+                str(exc), exc.location, exc.code or "invalid_request"
+            )
+            return
+        self._send_json(200, result)
+
+    def _read_json_payload(self) -> tuple[object | None, tuple[str, str] | None]:
+        """读取并解析 JSON 请求体；失败返回 (None, (message, code))。"""
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
-            self._bad_request("invalid Content-Length header", None, "bad_request")
-            return
+            return None, ("invalid Content-Length header", "bad_request")
         if length <= 0:
-            self._bad_request("empty request body", None, "bad_request")
-            return
+            return None, ("empty request body", "bad_request")
         if length > MAX_BODY_BYTES:
-            self._bad_request(
+            return None, (
                 f"request body too large ({length} > {MAX_BODY_BYTES} bytes)",
-                None,
                 "payload_too_large",
             )
-            return
-
         raw = self.rfile.read(length)
         try:
-            payload = json.loads(raw.decode("utf-8"))
+            return json.loads(raw.decode("utf-8")), None
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            self._bad_request(f"request body is not valid JSON: {exc}", None, "invalid_json")
-            return
-
-        if isinstance(payload, dict) and "rectangles" in payload:
-            records = payload["rectangles"]
-        else:
-            records = payload
-
-        try:
-            area, perimeter = audit_raw(records)
-        except GeometryError as exc:
-            # 全量校验先于计算：这里绝不会产生部分结果。
-            self._bad_request(str(exc), exc.location, "invalid_rectangle")
-            return
-
-        self._send_json(200, {"area": area, "perimeter": perimeter})
+            return None, (f"request body is not valid JSON: {exc}", "invalid_json")
 
     def _bad_request(
         self, message: str, location: dict | None, code: str = "invalid_rectangle"

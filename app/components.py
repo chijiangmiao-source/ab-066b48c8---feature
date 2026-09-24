@@ -60,6 +60,19 @@ def _engine_selftest() -> None:
     if (area, perimeter) != (10, 14):
         raise AssertionError(f"engine selftest mismatch: {area=} {perimeter=}")
 
+    # 净空引擎：单个 6×6 方框，两点 (2,3)->(4,3)，闭集下 r=2 恰好压边。
+    from .clearance import clearance_audit_raw
+
+    result = clearance_audit_raw(
+        {
+            "rectangles": [{"id": "s", "x1": 0, "y1": 0, "x2": 6, "y2": 6}],
+            "start": [2, 3],
+            "end": [4, 3],
+        }
+    )
+    if result["r"] != 2 or result["path"][0] != [2, 3] or result["path"][-1] != [4, 3]:
+        raise AssertionError(f"clearance selftest mismatch: {result=}")
+
 
 class ComponentRegistry:
     def __init__(self) -> None:

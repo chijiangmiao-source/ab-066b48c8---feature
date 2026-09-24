@@ -169,5 +169,170 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(status, 404)
 
 
+class ClearanceApiTest(unittest.TestCase):
+    def setUp(self):
+        registry.start_all()
+        self.server = build_server("127.0.0.1", 0)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        _wait_closed(self.server)
+        self.thread.join(timeout=5)
+
+    def _request(self, body):
+        url = f"http://127.0.0.1:{self.port}/api/clearance-audit"
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def test_basic_clearance(self):
+        status, payload = self._request(
+            {
+                "rectangles": [{"id": "s", "x1": 0, "y1": 0, "x2": 6, "y2": 6}],
+                "start": [2, 3],
+                "end": [4, 3],
+            }
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["r"], 2)
+        self.assertEqual(payload["start"], [2, 3])
+        self.assertEqual(payload["end"], [4, 3])
+        self.assertEqual(payload["path"][0], [2, 3])
+        self.assertEqual(payload["path"][-1], [4, 3])
+        for p, q in zip(payload["path"], payload["path"][1:]):
+            self.assertTrue(p[0] == q[0] or p[1] == q[1])
+
+    def test_corner_touch_yields_r0(self):
+        status, payload = self._request(
+            {
+                "rectangles": [
+                    {"id": "a", "x1": 0, "y1": 0, "x2": 2, "y2": 2},
+                    {"id": "b", "x1": 2, "y1": 2, "x2": 4, "y2": 4},
+                ],
+                "start": [1, 1],
+                "end": [3, 3],
+            }
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["r"], 0)
+        self.assertGreaterEqual(len(payload["path"]), 2)
+
+    def test_point_outside_union_400(self):
+        status, payload = self._request(
+            {
+                "rectangles": [{"id": "s", "x1": 0, "y1": 0, "x2": 4, "y2": 4}],
+                "start": [1, 1],
+                "end": [9, 9],
+            }
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "point_outside_union")
+        self.assertEqual(payload["error"]["location"], {"point": "end"})
+        self.assertNotIn("r", payload)
+
+    def test_disjoint_unreachable_400(self):
+        status, payload = self._request(
+            {
+                "rectangles": [
+                    {"id": "a", "x1": 0, "y1": 0, "x2": 2, "y2": 2},
+                    {"id": "b", "x1": 5, "y1": 5, "x2": 7, "y2": 7},
+                ],
+                "start": [1, 1],
+                "end": [6, 6],
+            }
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "unreachable")
+
+    def test_invalid_rectangle_still_located(self):
+        status, payload = self._request(
+            {
+                "rectangles": [{"id": "s", "x1": 4, "y1": 0, "x2": 1, "y2": 4}],
+                "start": [1, 1],
+                "end": [2, 2],
+            }
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_rectangle")
+        self.assertEqual(payload["error"]["location"], {"index": 0, "id": "s"})
+
+    def test_too_many_rectangles(self):
+        rects = [
+            {"id": f"r{i}", "x1": 0, "y1": 0, "x2": 200, "y2": 200}
+            for i in range(181)
+        ]
+        status, payload = self._request(
+            {"rectangles": rects, "start": [1, 1], "end": [2, 2]}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_rectangle")
+        self.assertIn("180", payload["error"]["message"])
+
+    def test_bad_sample(self):
+        status, payload = self._request(
+            {
+                "rectangles": [{"id": "s", "x1": 0, "y1": 0, "x2": 4, "y2": 4}],
+                "start": [1.5, 1],
+                "end": [2, 2],
+            }
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_sample")
+
+    def test_audit_endpoint_unchanged(self):
+        # 原 /api/audit 的结果与错误行为保持不变。
+        status, payload = self._request_raw(
+            "POST",
+            "/api/audit",
+            [
+                {"id": "a", "x1": 0, "y1": 0, "x2": 3, "y2": 2},
+                {"id": "b", "x1": 1, "y1": 1, "x2": 4, "y2": 3},
+            ],
+        )
+        self.assertEqual((status, payload), (200, {"area": "10", "perimeter": "14"}))
+
+    def _request_raw(self, method, path, body):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, headers={"Content-Type": "application/json"}, method=method
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def test_503_when_not_ready(self):
+        from app.components import Component
+
+        saved = registry.scan_engine
+        try:
+            def boom():
+                raise RuntimeError("simulated engine failure")
+
+            registry.scan_engine = Component("scan-engine", boom)
+            registry.scan_engine.start()
+            status, payload = self._request(
+                {
+                    "rectangles": [{"id": "s", "x1": 0, "y1": 0, "x2": 4, "y2": 4}],
+                    "start": [1, 1],
+                    "end": [2, 2],
+                }
+            )
+            self.assertEqual(status, 503)
+            self.assertEqual(payload["error"]["code"], "not_ready")
+        finally:
+            registry.scan_engine = saved
+
+
 if __name__ == "__main__":
     unittest.main()
